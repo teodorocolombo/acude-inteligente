@@ -7,19 +7,25 @@
 #include "esp_http_client.h"
 
 #include "esp_err.h"
+#include "esp_log.h"
 
-#define CHAT_ID ""
-#define BOT_KEY ""
+#include "esp_crt_bundle.h"
+
+#define CHAT_ID "-4715049106"
+#define BOT_KEY "8147287770:AAH9JW-X1XdUT2xdQLU-o4X73Py29O_zwtY"
+
+static const char *TAG = "telegram_sender";
+static const char ENDPOINT[] = "https://api.telegram.org/bot" BOT_KEY "/sendMessage";
 
 esp_err_t send_to_telegram(const char *message) {
-    char url[128];
-    snprintf(url, sizeof(url), "https://api.telegram.org/bot%s/sendMessage", BOT_KEY);
+    ESP_LOGI(TAG, "Sending message: %s", message);
 
     const esp_http_client_config_t config = {
-        .url = url,
+        .url = ENDPOINT,
         .method = HTTP_METHOD_POST,
-        .timeout_ms = 5000,
-        .disable_auto_redirect = true,
+        .timeout_ms = 50000,
+        .disable_auto_redirect = false,
+        .crt_bundle_attach = esp_crt_bundle_attach
     };
 
     esp_http_client_handle_t client = esp_http_client_init(&config);

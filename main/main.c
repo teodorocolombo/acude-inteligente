@@ -1,7 +1,8 @@
 #include <string.h>
 
+#include "esp_event.h"
 #include "esp_log.h"
-#include "esp_system.h"
+#include "esp_timer.h"
 #include "nvs_flash.h"
 #include "lwip/err.h"
 #include "lwip/sys.h"
@@ -17,6 +18,9 @@
 #define DEFAULT_TASK_STACK_SIZE_BYTES 4096
 #define DEFAULT_QUEUE_SIZE 10
 #define FLOAT_ITEM_SIZE sizeof(float)
+
+/* Timer interval once every day (24 Hours) */
+#define TIME_PERIOD (86400000000ULL)
 
 /* START ReadTemperatureSensorTask */
 StackType_t xReadTemperatureSensorStack[DEFAULT_TASK_STACK_SIZE_BYTES];
@@ -90,7 +94,7 @@ void create_queues() {
                                                        &xTemperatureSensorQueueBuffer);
 }
 
-void vReadTemperatureSensorTask(void *pvParameters) {\
+void vReadTemperatureSensorTask(void *pvParameters) {
     ESP_LOGI(TAG, "Starting vReadTemperatureSensorTask");
     temp_sensor_init();
     float temperature = 0.0f;
