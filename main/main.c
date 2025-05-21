@@ -19,6 +19,9 @@
 #define DEFAULT_QUEUE_SIZE 10
 #define FLOAT_ITEM_SIZE sizeof(float)
 
+#define WEBHOOK_PUBLISHER_MESSAGE_LENGTH 512
+#define WEBHOOK_PUBLISHER_MESSAGE_SIZE sizeof(char) * WEBHOOK_PUBLISHER_MESSAGE_LENGTH
+
 /* Timer interval once every day (24 Hours) */
 #define TIME_PERIOD (86400000000ULL)
 
@@ -37,10 +40,15 @@ TaskHandle_t xWebhookPublisherTaskHandle;
 void vWebhookPublisherTask(void *pvParameters);
 
 /* START TemperatureSensorQueue */
-
 QueueHandle_t xTemperatureSensorQueueHandle;
 uint8_t xTemperatureSensorQueueStorageArea[DEFAULT_QUEUE_SIZE * FLOAT_ITEM_SIZE];
 StaticQueue_t xTemperatureSensorQueueBuffer;
+
+/* START WebhookPublisherQueue */
+QueueHandle_t xWebhookPublisherQueueHandle;
+uint8_t xWebhookPublisherQueueStorageArea[DEFAULT_QUEUE_SIZE * STRING_ITEM_SIZE];
+StaticQueue_t xWebhookPublisherQueueBuffer;
+
 
 /* COMMONS */
 static const char *TAG = "main";
@@ -92,6 +100,10 @@ void create_queues() {
                                                        FLOAT_ITEM_SIZE,
                                                        &xTemperatureSensorQueueStorageArea[0],
                                                        &xTemperatureSensorQueueBuffer);
+    xWebhookPublisherQueueHandle = xQueueCreateStatic(DEFAULT_QUEUE_SIZE,
+                                                       STRING_ITEM_SIZE,
+                                                       &xWebhookPublisherStorageArea[0],
+                                                       &xWebhookPublisherQueueBuffer);
 }
 
 void vReadTemperatureSensorTask(void *pvParameters) {
@@ -108,30 +120,15 @@ void vReadTemperatureSensorTask(void *pvParameters) {
 }
 
 void vWebhookPublisherTask(void *pvParameters) {
-    float temperature;
-    char buffer[32];
-    char message[64];
-    int bufferCleaner;
+    char message[WEBHOOK_PUBLISHER_MESSAGE_LENGTH];
     while (1) {
-        if (xQueueReceive(xTemperatureSensorQueueHandle, &temperature, 100 / portTICK_PERIOD_MS) == pdFALSE) {
+        if (xQueueReceive(xWebhookPublisherQueueHandle, &message, 100 / portTICK_PERIOD_MS) == pdFALSE) {
             continue;
         }
-
-        if (float_to_char(&temperature, buffer, sizeof(buffer)) != EXIT_SUCCESS) {
-            ESP_LOGE(TAG, "Erro ao converter float para string!!");
-            continue;
-        }
-
-        strcpy(message, "Temperatura: ");
-        strcat(message, buffer);
-        strcat(message, "°C");
-
-        ESP_LOGI(TAG, "%s", message);
 
         send_to_telegram(message);
 
-        while ((bufferCleaner = getchar()) != '\n' && bufferCleaner != EOF) {
-        }
+        memset(message, '\0', sizeof(message));
 
         vTaskDelay(pdMS_TO_TICKS(50));
     }
