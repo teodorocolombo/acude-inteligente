@@ -64,7 +64,7 @@ DS18B20_ERROR temp_sensor_read(float *value) {
     ds18b20_convert_all(owb);
 
     const float waited = ds18b20_wait_for_conversion(ds18b20);
-    ESP_LOGI(TAG, "Waited %.1f ms", waited);
+    ESP_LOGD(TAG, "Waited %.1f ms", waited);
 
     const DS18B20_ERROR err = ds18b20_read_temp(ds18b20, value);
     if (err != DS18B20_OK) {

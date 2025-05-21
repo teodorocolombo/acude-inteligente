@@ -19,7 +19,10 @@
 #define DEFAULT_QUEUE_SIZE 10
 #define FLOAT_ITEM_SIZE sizeof(float)
 
-#define TEMPERATURE_SAMPLE_BUFFER_SIZE 100
+#define TEMPERATURE_SAMPLE_BUFFER_SIZE 25
+
+#define WEBHOOK_PUBLISHER_MESSAGE_LENGTH 512
+#define WEBHOOK_PUBLISHER_MESSAGE_SIZE sizeof(char) * WEBHOOK_PUBLISHER_MESSAGE_LENGTH
 
 /* START ReadTemperatureSensorTask */
 StackType_t xReadTemperatureSensorStack[DEFAULT_TASK_STACK_SIZE_BYTES];
@@ -39,16 +42,21 @@ void vWebhookPublisherTask(void *pvParameters);
 StackType_t xTemperatureProcessorTaskStack[DEFAULT_TASK_STACK_SIZE_BYTES];
 StaticTask_t xTemperatureProcessorTaskBuffer;
 TaskHandle_t xTemperatureProcessorTaskHandle;
-float temperature_sample_buffer[TEMPERATURE_SAMPLE_BUFFER_SIZE];
+float temperature_sample_buffer[TEMPERATURE_SAMPLE_BUFFER_SIZE] = {0};
 uint8_t temperature_sample_buffer_index = 0;
 
 void vTemperatureProcessorTask(void *pvParameters);
 
 /* START TemperatureSensorQueue */
-
 QueueHandle_t xTemperatureSensorQueueHandle;
 uint8_t xTemperatureSensorQueueStorageArea[DEFAULT_QUEUE_SIZE * FLOAT_ITEM_SIZE];
 StaticQueue_t xTemperatureSensorQueueBuffer;
+
+/* START WebhookPublisherQueue */
+QueueHandle_t xWebhookPublisherQueueHandle;
+uint8_t xWebhookPublisherQueueStorageArea[DEFAULT_QUEUE_SIZE * WEBHOOK_PUBLISHER_MESSAGE_SIZE];
+StaticQueue_t xWebhookPublisherQueueBuffer;
+
 
 /* COMMONS */
 static const char *TAG = "main";
@@ -56,8 +64,6 @@ static const char *TAG = "main";
 void create_tasks();
 
 void create_queues();
-
-uint8_t float_to_char(const float *number, char *buffer, size_t buffer_size);
 
 void initialize_nvs();
 
@@ -109,6 +115,10 @@ void create_queues() {
                                                        FLOAT_ITEM_SIZE,
                                                        &xTemperatureSensorQueueStorageArea[0],
                                                        &xTemperatureSensorQueueBuffer);
+    xWebhookPublisherQueueHandle = xQueueCreateStatic(DEFAULT_QUEUE_SIZE,
+                                                       WEBHOOK_PUBLISHER_MESSAGE_SIZE,
+                                                       &xWebhookPublisherQueueStorageArea[0],
+                                                       &xWebhookPublisherQueueBuffer);
 }
 
 void vReadTemperatureSensorTask(void *pvParameters) {
@@ -120,47 +130,23 @@ void vReadTemperatureSensorTask(void *pvParameters) {
             ESP_LOGI(TAG, "Temperature: %.2f °C", temperature);
             xQueueSend(xTemperatureSensorQueueHandle, &temperature, portMAX_DELAY);
         }
-        vTaskDelay(2000 / portTICK_PERIOD_MS);
+        vTaskDelay(100 / portTICK_PERIOD_MS);
     }
 }
 
 void vWebhookPublisherTask(void *pvParameters) {
-    float temperature;
-    char buffer[32];
-    char message[64];
-    int bufferCleaner;
+    char message[WEBHOOK_PUBLISHER_MESSAGE_LENGTH];
     while (1) {
-        if (xQueueReceive(xTemperatureSensorQueueHandle, &temperature, 100 / portTICK_PERIOD_MS) == pdFALSE) {
+        if (xQueueReceive(xWebhookPublisherQueueHandle, &message, 100 / portTICK_PERIOD_MS) == pdFALSE) {
             continue;
         }
-
-        if (float_to_char(&temperature, buffer, sizeof(buffer)) != EXIT_SUCCESS) {
-            ESP_LOGE(TAG, "Erro ao converter float para string!!");
-            continue;
-        }
-
-        strcpy(message, "Temperatura: ");
-        strcat(message, buffer);
-        strcat(message, "°C");
-
-        ESP_LOGI(TAG, "%s", message);
 
         send_to_telegram(message);
 
-        while ((bufferCleaner = getchar()) != '\n' && bufferCleaner != EOF) {
-        }
+        memset(message, '\0', sizeof(message));
 
         vTaskDelay(pdMS_TO_TICKS(50));
     }
-}
-
-uint8_t float_to_char(const float *number, char *buffer, const size_t buffer_size) {
-    const int ret = snprintf(buffer, buffer_size, "%.1f", *number);
-
-    if (ret < 0 || (size_t) ret >= buffer_size) {
-        return EXIT_FAILURE;
-    }
-    return EXIT_SUCCESS;
 }
 
 void vTemperatureProcessorTask(void *pvParameters) {
@@ -168,21 +154,29 @@ void vTemperatureProcessorTask(void *pvParameters) {
     float current_temperature = 0.0f;
     while (true) {
         if (xQueueReceive(xTemperatureSensorQueueHandle, &current_temperature, 1000 / portTICK_PERIOD_MS) == pdTRUE) {
-            if (temperature_sample_buffer_index >= TEMPERATURE_SAMPLE_BUFFER_SIZE - 1) {
+            if (temperature_sample_buffer_index >= TEMPERATURE_SAMPLE_BUFFER_SIZE) {
                 get_temperature_mean_and_flush_to_queue();
                 continue;
             }
             temperature_sample_buffer[temperature_sample_buffer_index++] = current_temperature;
         }
-        vTaskDelay(500 / portTICK_PERIOD_MS);
+        vTaskDelay(100 / portTICK_PERIOD_MS);
     }
 }
 
 void get_temperature_mean_and_flush_to_queue(void) {
-    float sum = 0;
+    float sum = 0.0f;
+    char message[WEBHOOK_PUBLISHER_MESSAGE_LENGTH] = {0};
+
     for (int i = 0; i < TEMPERATURE_SAMPLE_BUFFER_SIZE; i++) {
         sum += temperature_sample_buffer[i];
     }
-    float mean = sum / TEMPERATURE_SAMPLE_BUFFER_SIZE;
-    //send mean to webhook queue
+
+    const float mean = sum / TEMPERATURE_SAMPLE_BUFFER_SIZE;
+    sprintf(message, "Temperatura média das últimas %d amostras: %.2f", TEMPERATURE_SAMPLE_BUFFER_SIZE, mean);
+
+    xQueueSend(xWebhookPublisherQueueHandle, &message, 100/ portTICK_PERIOD_MS);
+
+    memset(temperature_sample_buffer, 0, sizeof(temperature_sample_buffer));
+    temperature_sample_buffer_index = 0;
 }
