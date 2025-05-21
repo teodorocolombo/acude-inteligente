@@ -19,8 +19,7 @@
 #define DEFAULT_QUEUE_SIZE 10
 #define FLOAT_ITEM_SIZE sizeof(float)
 
-/* Timer interval once every day (24 Hours) */
-#define TIME_PERIOD (86400000000ULL)
+#define TEMPERATURE_SAMPLE_BUFFER_SIZE 100
 
 /* START ReadTemperatureSensorTask */
 StackType_t xReadTemperatureSensorStack[DEFAULT_TASK_STACK_SIZE_BYTES];
@@ -35,6 +34,15 @@ StaticTask_t xWebhookPublisherTaskBuffer;
 TaskHandle_t xWebhookPublisherTaskHandle;
 
 void vWebhookPublisherTask(void *pvParameters);
+
+/* START TemperatureProcessorTask */
+StackType_t xTemperatureProcessorTaskStack[DEFAULT_TASK_STACK_SIZE_BYTES];
+StaticTask_t xTemperatureProcessorTaskBuffer;
+TaskHandle_t xTemperatureProcessorTaskHandle;
+float temperature_sample_buffer[TEMPERATURE_SAMPLE_BUFFER_SIZE];
+uint8_t temperature_sample_buffer_index = 0;
+
+void vTemperatureProcessorTask(void *pvParameters);
 
 /* START TemperatureSensorQueue */
 
@@ -52,6 +60,8 @@ void create_queues();
 uint8_t float_to_char(const float *number, char *buffer, size_t buffer_size);
 
 void initialize_nvs();
+
+void get_temperature_mean_and_flush_to_queue(void);
 
 void app_main() {
     initialize_nvs();
@@ -85,6 +95,13 @@ void create_tasks() {
                                                      tskIDLE_PRIORITY,
                                                      xWebhookPublisherTaskStack,
                                                      &xWebhookPublisherTaskBuffer);
+    xTemperatureProcessorTaskHandle = xTaskCreateStatic(vTemperatureProcessorTask,
+                                                        "TemperatureProcessorTask",
+                                                        DEFAULT_TASK_STACK_SIZE_BYTES,
+                                                        NULL,
+                                                        tskIDLE_PRIORITY,
+                                                        xTemperatureProcessorTaskStack,
+                                                        &xTemperatureProcessorTaskBuffer);
 }
 
 void create_queues() {
@@ -144,4 +161,28 @@ uint8_t float_to_char(const float *number, char *buffer, const size_t buffer_siz
         return EXIT_FAILURE;
     }
     return EXIT_SUCCESS;
+}
+
+void vTemperatureProcessorTask(void *pvParameters) {
+    ESP_LOGI(TAG, "Starting vTemperatureProcessorTask");
+    float current_temperature = 0.0f;
+    while (true) {
+        if (xQueueReceive(xTemperatureSensorQueueHandle, &current_temperature, 1000 / portTICK_PERIOD_MS) == pdTRUE) {
+            if (temperature_sample_buffer_index >= TEMPERATURE_SAMPLE_BUFFER_SIZE - 1) {
+                get_temperature_mean_and_flush_to_queue();
+                continue;
+            }
+            temperature_sample_buffer[temperature_sample_buffer_index++] = current_temperature;
+        }
+        vTaskDelay(500 / portTICK_PERIOD_MS);
+    }
+}
+
+void get_temperature_mean_and_flush_to_queue(void) {
+    float sum = 0;
+    for (int i = 0; i < TEMPERATURE_SAMPLE_BUFFER_SIZE; i++) {
+        sum += temperature_sample_buffer[i];
+    }
+    float mean = sum / TEMPERATURE_SAMPLE_BUFFER_SIZE;
+    //send mean to webhook queue
 }
