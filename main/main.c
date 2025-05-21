@@ -154,15 +154,11 @@ void vReadTemperatureSensorTask(void *pvParameters) {
 void vWebhookPublisherTask(void *pvParameters) {
     char message[WEBHOOK_PUBLISHER_MESSAGE_LENGTH];
     while (1) {
-        if (xQueueReceive(xWebhookPublisherQueueHandle, &message, 100 / portTICK_PERIOD_MS) == pdFALSE) {
-            continue;
+        if (xQueueReceive(xWebhookPublisherQueueHandle, &message, 100 / portTICK_PERIOD_MS) == pdTRUE) {
+            send_to_telegram(message);
+            memset(message, '\0', sizeof(message));
         }
-
-        send_to_telegram(message);
-
-        memset(message, '\0', sizeof(message));
-
-        vTaskDelay(pdMS_TO_TICKS(50));
+        vTaskDelay(100 / portTICK_PERIOD_MS);
     }
 }
 
@@ -214,6 +210,6 @@ void vHealthCheckTask(void *pvParameters) {
 
 void print_stack_high_water_mark(const TaskHandle_t *handle) {
     ESP_LOGI(TAG, "Minimum free stack for %s Task: %u bytes",
-        pcTaskGetName(*handle),
-        uxTaskGetStackHighWaterMark(*handle) * WORD_SIZE_IN_BYTES);
+             pcTaskGetName(*handle),
+             uxTaskGetStackHighWaterMark(*handle) * WORD_SIZE_IN_BYTES);
 }
