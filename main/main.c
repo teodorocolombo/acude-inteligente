@@ -15,6 +15,7 @@
 #include "wifi_station.h"
 
 /* START DEFINE */
+#define WORD_SIZE_IN_BYTES 4
 #define DEFAULT_TASK_STACK_SIZE_BYTES 4096
 #define DEFAULT_QUEUE_SIZE 10
 #define FLOAT_ITEM_SIZE sizeof(float)
@@ -57,6 +58,13 @@ QueueHandle_t xWebhookPublisherQueueHandle;
 uint8_t xWebhookPublisherQueueStorageArea[DEFAULT_QUEUE_SIZE * WEBHOOK_PUBLISHER_MESSAGE_SIZE];
 StaticQueue_t xWebhookPublisherQueueBuffer;
 
+/* START HealthCheckTask */
+StackType_t xHealthCheckTaskStack[DEFAULT_TASK_STACK_SIZE_BYTES];
+StaticTask_t xHealthCheckTaskBuffer;
+TaskHandle_t xHealthCheckTaskHandle;
+
+void vHealthCheckTask(void *pvParameters);
+
 
 /* COMMONS */
 static const char *TAG = "main";
@@ -68,6 +76,8 @@ void create_queues();
 void initialize_nvs();
 
 void get_temperature_mean_and_flush_to_queue(void);
+
+void print_stack_high_water_mark(const TaskHandle_t *handle);
 
 void app_main() {
     initialize_nvs();
@@ -94,13 +104,13 @@ void create_tasks() {
                                                      tskIDLE_PRIORITY,
                                                      xReadTemperatureSensorStack,
                                                      &xReadTemperatureSensorBuffer);
-    xReadTemperatureSensorHandle = xTaskCreateStatic(vWebhookPublisherTask,
-                                                     "WebhookPublisherTask",
-                                                     DEFAULT_TASK_STACK_SIZE_BYTES,
-                                                     NULL,
-                                                     tskIDLE_PRIORITY,
-                                                     xWebhookPublisherTaskStack,
-                                                     &xWebhookPublisherTaskBuffer);
+    xWebhookPublisherTaskHandle = xTaskCreateStatic(vWebhookPublisherTask,
+                                                    "WebhookPublisherTask",
+                                                    DEFAULT_TASK_STACK_SIZE_BYTES,
+                                                    NULL,
+                                                    tskIDLE_PRIORITY,
+                                                    xWebhookPublisherTaskStack,
+                                                    &xWebhookPublisherTaskBuffer);
     xTemperatureProcessorTaskHandle = xTaskCreateStatic(vTemperatureProcessorTask,
                                                         "TemperatureProcessorTask",
                                                         DEFAULT_TASK_STACK_SIZE_BYTES,
@@ -108,6 +118,13 @@ void create_tasks() {
                                                         tskIDLE_PRIORITY,
                                                         xTemperatureProcessorTaskStack,
                                                         &xTemperatureProcessorTaskBuffer);
+    xHealthCheckTaskHandle = xTaskCreateStatic(vHealthCheckTask,
+                                               "HealthCheckTask",
+                                               DEFAULT_TASK_STACK_SIZE_BYTES,
+                                               NULL,
+                                               tskIDLE_PRIORITY,
+                                               xHealthCheckTaskStack,
+                                               &xHealthCheckTaskBuffer);
 }
 
 void create_queues() {
@@ -116,9 +133,9 @@ void create_queues() {
                                                        &xTemperatureSensorQueueStorageArea[0],
                                                        &xTemperatureSensorQueueBuffer);
     xWebhookPublisherQueueHandle = xQueueCreateStatic(DEFAULT_QUEUE_SIZE,
-                                                       WEBHOOK_PUBLISHER_MESSAGE_SIZE,
-                                                       &xWebhookPublisherQueueStorageArea[0],
-                                                       &xWebhookPublisherQueueBuffer);
+                                                      WEBHOOK_PUBLISHER_MESSAGE_SIZE,
+                                                      &xWebhookPublisherQueueStorageArea[0],
+                                                      &xWebhookPublisherQueueBuffer);
 }
 
 void vReadTemperatureSensorTask(void *pvParameters) {
@@ -173,10 +190,30 @@ void get_temperature_mean_and_flush_to_queue(void) {
     }
 
     const float mean = sum / TEMPERATURE_SAMPLE_BUFFER_SIZE;
-    sprintf(message, "Temperatura média das últimas %d amostras: %.2f", TEMPERATURE_SAMPLE_BUFFER_SIZE, mean);
+    sprintf(message, "Temperatura média das últimas %d amostras: %.2f °C", TEMPERATURE_SAMPLE_BUFFER_SIZE, mean);
 
     xQueueSend(xWebhookPublisherQueueHandle, &message, 100/ portTICK_PERIOD_MS);
 
     memset(temperature_sample_buffer, 0, sizeof(temperature_sample_buffer));
     temperature_sample_buffer_index = 0;
+}
+
+void vHealthCheckTask(void *pvParameters) {
+    ESP_LOGI(TAG, "Starting vHealthCheckTask");
+    while (1) {
+        ESP_LOGI(TAG, "Starting Health Check");
+        ESP_LOGI(TAG, "Minimum free heap size: %" PRIu32 " bytes", esp_get_minimum_free_heap_size());
+        print_stack_high_water_mark(&xReadTemperatureSensorHandle);
+        print_stack_high_water_mark(&xWebhookPublisherTaskHandle);
+        print_stack_high_water_mark(&xTemperatureProcessorTaskHandle);
+        print_stack_high_water_mark(&xHealthCheckTaskHandle);
+        ESP_LOGI(TAG, "Ending Health Check");
+        vTaskDelay(30000 / portTICK_PERIOD_MS);
+    }
+}
+
+void print_stack_high_water_mark(const TaskHandle_t *handle) {
+    ESP_LOGI(TAG, "Minimum free stack for %s Task: %u bytes",
+        pcTaskGetName(*handle),
+        uxTaskGetStackHighWaterMark(*handle) * WORD_SIZE_IN_BYTES);
 }
