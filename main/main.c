@@ -9,21 +9,38 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
 
 #include "temp_sensor.h"
 #include "telegram_sender.h"
 #include "wifi_station.h"
+#include "pushbutton.h"
+#include "relay.h"
 
 /* START DEFINE */
 #define WORD_SIZE_IN_BYTES 4
 #define DEFAULT_TASK_STACK_SIZE_BYTES 4096
 #define DEFAULT_QUEUE_SIZE 10
 #define FLOAT_ITEM_SIZE sizeof(float)
+#define RELAY_COMMAND_T_SIZE sizeof(relay_command_t)
 
 #define TEMPERATURE_SAMPLE_BUFFER_SIZE 25
 
 #define WEBHOOK_PUBLISHER_MESSAGE_LENGTH 512
 #define WEBHOOK_PUBLISHER_MESSAGE_SIZE sizeof(char) * WEBHOOK_PUBLISHER_MESSAGE_LENGTH
+
+static gpio_num_t shutdown_isr_button_gpio = GPIO_NUM_23;
+StackType_t xGracefulShutdownTaskStack[DEFAULT_TASK_STACK_SIZE_BYTES];
+StaticTask_t xGracefulShutdownTaskBuffer;
+TaskHandle_t xGracefulShutdownTaskHandle;
+
+void vGracefulShutdownTask(void *pvParameters);
+
+static void IRAM_ATTR gpio_isr_shutdown_handler(void *arg);
+
+QueueHandle_t xShutdownRequestQueueHandle;
+uint8_t xShutdownRequestQueueStorageArea[DEFAULT_QUEUE_SIZE * WORD_SIZE_IN_BYTES];
+StaticQueue_t xShutdownRequestQueueBuffer;
 
 /* START ReadTemperatureSensorTask */
 StackType_t xReadTemperatureSensorStack[DEFAULT_TASK_STACK_SIZE_BYTES];
@@ -65,6 +82,24 @@ TaskHandle_t xHealthCheckTaskHandle;
 
 void vHealthCheckTask(void *pvParameters);
 
+/* START RelayControlTask */
+StackType_t xControlRelayTaskStack[DEFAULT_TASK_STACK_SIZE_BYTES];
+StaticTask_t xControlRelayTaskBuffer;
+TaskHandle_t xControlRelayTaskHandle;
+
+/* START RelayCommandQueue */
+typedef enum {
+    RELAY_CMD_NONE = 0,
+    RELAY_CMD_ACTIVATE,
+    RELAY_CMD_DEACTIVATE
+} relay_command_t;
+
+QueueHandle_t xRelayCommandQueueHandle;
+uint8_t xRelayCommandQueueStorageArea[DEFAULT_QUEUE_SIZE * RELAY_COMMAND_T_SIZE];
+StaticQueue_t xRelayCommandQueueBuffer;
+
+void vControlRelayTask(void *pvParameters);
+
 
 /* COMMONS */
 static const char *TAG = "main";
@@ -82,9 +117,16 @@ void print_stack_high_water_mark(const TaskHandle_t *handle);
 void app_main() {
     initialize_nvs();
     wifi_init_sta();
+    ESP_LOGI(TAG, "Initializing Queues");
+    create_queues();
     ESP_LOGI(TAG, "Initializing Tasks");
     create_tasks();
-    create_queues();
+
+    ESP_LOGI(TAG, "Setting up shutdown button using pushbutton module");
+    const esp_err_t err = init_shutdown_isr(shutdown_isr_button_gpio, gpio_isr_shutdown_handler, NULL);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize shutdown button: %s", esp_err_to_name(err));
+    }
 }
 
 void initialize_nvs() {
@@ -125,6 +167,20 @@ void create_tasks() {
                                                tskIDLE_PRIORITY,
                                                xHealthCheckTaskStack,
                                                &xHealthCheckTaskBuffer);
+    xGracefulShutdownTaskHandle = xTaskCreateStatic(vGracefulShutdownTask,
+                                                    "GracefulShutdownTask",
+                                                    DEFAULT_TASK_STACK_SIZE_BYTES,
+                                                    NULL,
+                                                    tskIDLE_PRIORITY + 1,
+                                                    xGracefulShutdownTaskStack,
+                                                    &xGracefulShutdownTaskBuffer);
+    xControlRelayTaskHandle = xTaskCreateStatic(vControlRelayTask,
+                                                "ControlRelayTask",
+                                                DEFAULT_TASK_STACK_SIZE_BYTES,
+                                                NULL,
+                                                tskIDLE_PRIORITY,
+                                                xControlRelayTaskStack,
+                                                &xControlRelayTaskBuffer);
 }
 
 void create_queues() {
@@ -136,6 +192,41 @@ void create_queues() {
                                                       WEBHOOK_PUBLISHER_MESSAGE_SIZE,
                                                       &xWebhookPublisherQueueStorageArea[0],
                                                       &xWebhookPublisherQueueBuffer);
+    xShutdownRequestQueueHandle = xQueueCreateStatic(DEFAULT_QUEUE_SIZE,
+                                                     WORD_SIZE_IN_BYTES,
+                                                     &xShutdownRequestQueueStorageArea[0],
+                                                     &xShutdownRequestQueueBuffer);
+    xRelayCommandQueueHandle = xQueueCreateStatic(DEFAULT_QUEUE_SIZE,
+                                                  RELAY_COMMAND_T_SIZE,
+                                                  xRelayCommandQueueStorageArea,
+                                                  &xRelayCommandQueueBuffer);
+}
+
+static void IRAM_ATTR gpio_isr_shutdown_handler(void *arg) {
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    vTaskNotifyGiveFromISR(xGracefulShutdownTaskHandle, &xHigherPriorityTaskWoken);
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+}
+
+void vGracefulShutdownTask(void *pvParameters) {
+    ESP_LOGI(TAG, "Starting vGracefulShutdownTask");
+    while (true) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+        vTaskDelay(pdMS_TO_TICKS(50));
+        if (gpio_get_level(shutdown_isr_button_gpio) == 0) {
+            ESP_LOGW(TAG, "Shutdown button pressed on GPIO %d! Initiating graceful shutdown...",
+                     shutdown_isr_button_gpio);
+
+            vTaskSuspend(xReadTemperatureSensorHandle);
+            vTaskDelete(xReadTemperatureSensorHandle);
+            ESP_LOGI(TAG, "Finished xReadTemperatureSensorHandle");
+
+            ESP_LOGW(TAG, "Simulating graceful shutdown complete. Restarting now...");
+            vTaskDelay(pdMS_TO_TICKS(2500));
+            esp_restart();
+        }
+    }
 }
 
 void vReadTemperatureSensorTask(void *pvParameters) {
@@ -147,18 +238,18 @@ void vReadTemperatureSensorTask(void *pvParameters) {
             ESP_LOGI(TAG, "Temperature: %.2f °C", temperature);
             xQueueSend(xTemperatureSensorQueueHandle, &temperature, portMAX_DELAY);
         }
-        vTaskDelay(100 / portTICK_PERIOD_MS);
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 
 void vWebhookPublisherTask(void *pvParameters) {
     char message[WEBHOOK_PUBLISHER_MESSAGE_LENGTH];
-    while (1) {
-        if (xQueueReceive(xWebhookPublisherQueueHandle, &message, 100 / portTICK_PERIOD_MS) == pdTRUE) {
+    while (true) {
+        if (xQueueReceive(xWebhookPublisherQueueHandle, &message, pdMS_TO_TICKS(100)) == pdTRUE) {
             send_to_telegram(message);
             memset(message, '\0', sizeof(message));
         }
-        vTaskDelay(100 / portTICK_PERIOD_MS);
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 
@@ -166,14 +257,14 @@ void vTemperatureProcessorTask(void *pvParameters) {
     ESP_LOGI(TAG, "Starting vTemperatureProcessorTask");
     float current_temperature = 0.0f;
     while (true) {
-        if (xQueueReceive(xTemperatureSensorQueueHandle, &current_temperature, 1000 / portTICK_PERIOD_MS) == pdTRUE) {
+        if (xQueueReceive(xTemperatureSensorQueueHandle, &current_temperature, pdMS_TO_TICKS(1000)) == pdTRUE) {
             if (temperature_sample_buffer_index >= TEMPERATURE_SAMPLE_BUFFER_SIZE) {
                 get_temperature_mean_and_flush_to_queue();
                 continue;
             }
             temperature_sample_buffer[temperature_sample_buffer_index++] = current_temperature;
         }
-        vTaskDelay(100 / portTICK_PERIOD_MS);
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 
@@ -196,13 +287,14 @@ void get_temperature_mean_and_flush_to_queue(void) {
 
 void vHealthCheckTask(void *pvParameters) {
     ESP_LOGI(TAG, "Starting vHealthCheckTask");
-    while (1) {
+    while (true) {
         ESP_LOGI(TAG, "Starting Health Check");
         ESP_LOGI(TAG, "Minimum free heap size: %" PRIu32 " bytes", esp_get_minimum_free_heap_size());
         print_stack_high_water_mark(&xReadTemperatureSensorHandle);
         print_stack_high_water_mark(&xWebhookPublisherTaskHandle);
         print_stack_high_water_mark(&xTemperatureProcessorTaskHandle);
         print_stack_high_water_mark(&xHealthCheckTaskHandle);
+        print_stack_high_water_mark(&xGracefulShutdownTaskHandle);
         ESP_LOGI(TAG, "Ending Health Check");
         vTaskDelay(30000 / portTICK_PERIOD_MS);
     }
@@ -212,4 +304,37 @@ void print_stack_high_water_mark(const TaskHandle_t *handle) {
     ESP_LOGI(TAG, "Minimum free stack for %s Task: %u bytes",
              pcTaskGetName(*handle),
              uxTaskGetStackHighWaterMark(*handle) * WORD_SIZE_IN_BYTES);
+}
+
+void vControlRelayTask(void *pvParameters) {
+    ESP_LOGI(TAG, "Starting vControlRelayTask");
+
+    esp_err_t err = relay_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize low-level relay driver: %s", esp_err_to_name(err));
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    relay_active();
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    relay_desactive();
+
+    relay_command_t received_command;
+    while (true) {
+        if (xQueueReceive(xRelayCommandQueueHandle, &received_command, portMAX_DELAY) == pdTRUE) {
+            switch (received_command) {
+                case RELAY_CMD_ACTIVATE:
+                    ESP_LOGI(TAG, "Received RELAY_CMD_ACTIVATE");
+                    relay_active();
+                    break;
+                case RELAY_CMD_DEACTIVATE:
+                    ESP_LOGI(TAG, "Received RELAY_CMD_DEACTIVATE");
+                    relay_desactive();
+                    break;
+                default:
+                    ESP_LOGW(TAG, "Received unknown relay command: %d", received_command);
+                    break;
+            }
+        }
+    }
 }

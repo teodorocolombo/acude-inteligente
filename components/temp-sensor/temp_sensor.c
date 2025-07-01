@@ -8,7 +8,7 @@
 #include "owb.h"
 #include "owb_rmt.h"
 
-#define GPIO_DS18B20 (2)
+#define GPIO_DS18B20 (14)
 #define DS18B20_RESOLUTION (DS18B20_RESOLUTION_12_BIT)
 #define SAMPLE_PERIOD_MS (1000)
 
