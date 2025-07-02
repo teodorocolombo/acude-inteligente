@@ -100,6 +100,13 @@ StaticQueue_t xRelayCommandQueueBuffer;
 
 void vControlRelayTask(void *pvParameters);
 
+/* START RelayTestTask */
+StackType_t xRelayTestTaskStack[DEFAULT_TASK_STACK_SIZE_BYTES];
+StaticTask_t xRelayTestTaskBuffer;
+TaskHandle_t xRelayTestTaskHandle;
+
+void vRelayTestTask(void *pvParameters);
+
 
 /* COMMONS */
 static const char *TAG = "main";
@@ -200,6 +207,13 @@ void create_queues() {
                                                   RELAY_COMMAND_T_SIZE,
                                                   xRelayCommandQueueStorageArea,
                                                   &xRelayCommandQueueBuffer);
+    xRelayTestTaskHandle = xTaskCreateStatic(vRelayTestTask,
+                                             "RelayTestTask",
+                                             DEFAULT_TASK_STACK_SIZE_BYTES,
+                                             NULL,
+                                             tskIDLE_PRIORITY,
+                                             xRelayTestTaskStack,
+                                             &xRelayTestTaskBuffer);
 }
 
 static void IRAM_ATTR gpio_isr_shutdown_handler(void *arg) {
@@ -308,6 +322,7 @@ void print_stack_high_water_mark(const TaskHandle_t *handle) {
 
 void vControlRelayTask(void *pvParameters) {
     ESP_LOGI(TAG, "Starting vControlRelayTask");
+    char message[WEBHOOK_PUBLISHER_MESSAGE_LENGTH] = {0};
 
     esp_err_t err = relay_init();
     if (err != ESP_OK) {
@@ -319,6 +334,7 @@ void vControlRelayTask(void *pvParameters) {
     vTaskDelay(pdMS_TO_TICKS(2000));
     relay_desactive();
 
+    memset(temperature_sample_buffer, 0, sizeof(temperature_sample_buffer));
     relay_command_t received_command;
     while (true) {
         if (xQueueReceive(xRelayCommandQueueHandle, &received_command, portMAX_DELAY) == pdTRUE) {
@@ -326,15 +342,43 @@ void vControlRelayTask(void *pvParameters) {
                 case RELAY_CMD_ACTIVATE:
                     ESP_LOGI(TAG, "Received RELAY_CMD_ACTIVATE");
                     relay_active();
+                    sprintf(message, "Relé ativado");
+                    xQueueSend(xWebhookPublisherQueueHandle, &message, pdMS_TO_TICKS(100));
                     break;
                 case RELAY_CMD_DEACTIVATE:
                     ESP_LOGI(TAG, "Received RELAY_CMD_DEACTIVATE");
                     relay_desactive();
+                    sprintf(message, "Relé desativado");
+                    xQueueSend(xWebhookPublisherQueueHandle, &message, pdMS_TO_TICKS(100));
                     break;
                 default:
                     ESP_LOGW(TAG, "Received unknown relay command: %d", received_command);
                     break;
             }
         }
+    }
+}
+
+void vRelayTestTask(void *pvParameters) {
+    ESP_LOGI(TAG, "Starting vRelayTestTask");
+    relay_command_t command;
+    bool activate = true;
+
+    while (true) {
+        if (activate) {
+            command = RELAY_CMD_ACTIVATE;
+            ESP_LOGI(TAG, "Sending RELAY_CMD_ACTIVATE to xRelayCommandQueueHandle");
+        } else {
+            command = RELAY_CMD_DEACTIVATE;
+            ESP_LOGI(TAG, "Sending RELAY_CMD_DEACTIVATE to xRelayCommandQueueHandle");
+        }
+
+        if (xQueueSend(xRelayCommandQueueHandle, &command, pdMS_TO_TICKS(100)) != pdTRUE) {
+            ESP_LOGE(TAG, "Failed to send relay command to queue.");
+        }
+
+        activate = !activate;
+
+        vTaskDelay(pdMS_TO_TICKS(30000));
     }
 }
